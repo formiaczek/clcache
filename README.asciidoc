@@ -46,8 +46,13 @@ Options
     Sets the maximum size of the cache in bytes.
     The default value is 1073741824 (1 GiB).
 
-Environment Variables
-~~~~~~~~~~~~~~~~~~~~~
+Configuration
+~~~~~~~~~~~~~
+
+Following values are read from Environment variables, and if absent, from either (in that order):
+  - (current-working-dir)\clcache.conf
+  - %HOME%\.clcache\clcache.conf
+  - %ALLUSERSPROFILE%\.clcache\clcache.conf
 
 CLCACHE_DIR::
     If set, points to the directory within which all the cached object files

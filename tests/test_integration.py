@@ -47,6 +47,28 @@ def cd(targetDirectory):
         os.chdir(oldDirectory)
 
 
+def executeStatsCommand(customEnv=None):
+    cmd = CLCACHE_CMD +  ["-s"]
+    if customEnv:
+        out = subprocess.check_output(cmd, env=customEnv)
+    else:
+        out = subprocess.check_output(cmd)
+    return extractStatsOutput(out.decode("ascii").strip())
+
+
+def extractStatsOutput(outputLines):
+    stats = dict()
+    print(outputLines)
+    for line in outputLines.splitlines():
+        kv = line.split(":", 1)
+        if len(kv) != 2 or not kv[1]:
+            continue
+        stats[kv[0].strip()] = kv[1].strip()
+    # special case to avoid duplication: Update 'Disc cache at X:\\blah\\ccache' => 'X:\\blah\\ccache'
+    stats["current cache dir"] = stats["current cache dir"].split("cache at")[1].strip()
+    return stats
+
+
 class TestCommandLineArguments(unittest.TestCase):
     def testValidMaxSize(self):
         with tempfile.TemporaryDirectory() as tempDir:
@@ -73,6 +95,87 @@ class TestCommandLineArguments(unittest.TestCase):
                 subprocess.call(cmd, env=customEnv),
                 0,
                 "Command must be able to print statistics")
+
+
+class TestGlobalSettings(unittest.TestCase):
+    def testSettingsDefault(self):
+        with tempfile.TemporaryDirectory() as tempDir:
+            customEnv = dict(os.environ, HOME=tempDir)
+            stats = executeStatsCommand(customEnv)
+            print(stats)
+            self.assertEqual(stats["current cache dir"], os.path.join(tempDir, "clcache"))
+
+    def testSettingsEnvironmentVariables(self):
+        with tempfile.TemporaryDirectory() as tempDir:
+            customEnv = dict(os.environ, CLCACHE_DIR=tempDir)
+            stats = executeStatsCommand(customEnv)
+            print(stats)
+            self.assertEqual(stats["current cache dir"], os.path.join(tempDir))
+
+    def testSettingsLocalConfigFile(self):
+        with tempfile.TemporaryDirectory() as tempDir:
+            with cd(tempDir):
+                confFileName = os.path.join(tempDir, "clcache.conf")
+                clcacheDir = os.path.join(tempDir, "clcache")
+                self._createConfFile(confFileName, CLCACHE_DIR=clcacheDir)
+                stats = executeStatsCommand()
+                self.assertEqual(stats["current cache dir"], clcacheDir)
+
+    def testConfigFileInHomeDir(self):
+        with tempfile.TemporaryDirectory() as tempDir:
+            confFileName = os.path.join(tempDir, ".clcache", "clcache.conf")
+            clcacheDir = os.path.join(tempDir, "clcache")
+            self._createConfFile(confFileName, CLCACHE_DIR=clcacheDir)
+            customEnv = dict(os.environ, HOME=tempDir)
+            stats = executeStatsCommand(customEnv)
+            self.assertEqual(stats["current cache dir"], clcacheDir)
+
+    def testHomeDirOverridenByEnvironment(self):
+        with tempfile.TemporaryDirectory() as tempDir:
+            confFileName = os.path.join(tempDir, ".clcache", "clcache.conf")
+            clcacheDir = os.path.join(tempDir, "clcache")
+            self._createConfFile(confFileName, CLCACHE_DIR="this should be ignored")
+            customEnv = dict(os.environ, HOME=tempDir, CLCACHE_DIR=clcacheDir)
+            stats = executeStatsCommand(customEnv)
+            self.assertEqual(stats["current cache dir"], clcacheDir)
+
+    def testSettingsConfigFileInProfiles(self):
+        with tempfile.TemporaryDirectory() as tempDir:
+            confFileName = os.path.join(tempDir, ".clcache", "clcache.conf")
+            clcacheDir = os.path.join(tempDir, "clcache")
+            self._createConfFile(confFileName, CLCACHE_DIR=clcacheDir)
+            customEnv = dict(os.environ, HOME="blah", ALLUSERSPROFILE=tempDir)
+            stats = executeStatsCommand(customEnv)
+            self.assertEqual(stats["current cache dir"], clcacheDir)
+
+    def testConfProfilesOverridenByEnvironment(self):
+        with tempfile.TemporaryDirectory() as tempDir:
+            confFileName = os.path.join(tempDir, ".clcache", "clcache.conf")
+            clcacheDir = os.path.join(tempDir, "clcache")
+            self._createConfFile(confFileName, CLCACHE_DIR="should be ignored")
+            customEnv = dict(os.environ, HOME="blah", ALLUSERSPROFILE=tempDir, CLCACHE_DIR=clcacheDir)
+            stats = executeStatsCommand(customEnv)
+            self.assertEqual(stats["current cache dir"], clcacheDir)
+
+    def testProfilesOverridenByHomeDir(self):
+        with tempfile.TemporaryDirectory() as tempDir:
+            clcacheDir = os.path.join(tempDir, "clcache")
+            homeDir = os.path.join(tempDir, "home")
+            self._createConfFile(os.path.join(homeDir, ".clcache", "clcache.conf"), CLCACHE_DIR=clcacheDir)
+            profilesDir = os.path.join(tempDir, "allusersprofile")
+            self._createConfFile(os.path.join(profilesDir, ".clcache", "clcache.conf"), CLCACHE_DIR="ignored")
+            customEnv = dict(os.environ, HOME=homeDir, ALLUSERSPROFILE=profilesDir)
+            stats = executeStatsCommand(customEnv)
+            self.assertEqual(stats["current cache dir"], clcacheDir)
+
+    def _createConfFile(self, filename, **settings):
+        dirname = os.path.dirname(filename)
+        if not os.path.exists(dirname):
+            os.makedirs(dirname)
+        with open(filename, "w") as f:
+            for k, v in settings.items():
+                f.write("{0} = {1}\n\r".format(k, v))
+
 
 class TestDistutils(unittest.TestCase):
     @pytest.mark.skipif(not MONKEY_LOADED, reason="Monkeypatch not loaded")

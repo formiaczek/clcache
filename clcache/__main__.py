@@ -24,7 +24,7 @@ import subprocess
 import sys
 import threading
 from tempfile import TemporaryFile
-from typing import Any, List, Tuple, Iterator
+from typing import Any, Dict, List, Tuple, Iterator
 
 VERSION = "4.1.0-dev"
 
@@ -308,6 +308,50 @@ class ManifestRepository:
         return HashAlgorithm(','.join(listOfHashes).encode()).hexdigest()
 
 
+class GlobalSettings:
+    """ Implements a common place to obain settings from. """
+    @staticmethod
+    def getValue(settingName, defaultValue=None):
+        value = os.environ.get(settingName, None)
+        if value is None: # compare to None to allow empty values
+            value = GlobalSettings._getFromCache(settingName)
+        return value if value is not None else defaultValue
+
+    # serves as a cache to only read the config file once
+    _cache = {} # type: Dict[str, str]
+
+    @staticmethod
+    def _getFromCache(settingName):
+        if not GlobalSettings._cache:
+            GlobalSettings._readFromFile()
+        return GlobalSettings._cache.get(settingName, None)
+
+    @staticmethod
+    def _readFromFile():
+        GlobalSettings._cache['dummy'] = 'dummy' # so that _readFromFile is only called once
+
+        # prefer config in current directory
+        filename = os.path.join(os.getcwd(), "clcache.conf")
+
+        # ..or in home directory..
+        if not os.path.exists(filename):
+            filename = os.path.join(os.path.expanduser("~"), ".clcache", "clcache.conf")
+
+        # or in "sysconfdir" (%ALLUSERSPROFILE%)
+        if not os.path.exists(filename):
+            dirname = os.environ.get('ALLUSERSPROFILE', None)
+            filename = os.path.join(dirname if dirname else "C:\\Users", ".clcache", "clcache.conf")
+        try:
+            with open(filename) as f:
+                for line in f.readlines():
+                    kv = line.split("=")
+                    if len(kv) != 2 or kv[0].startswith("#"):
+                        continue
+                    GlobalSettings._cache[kv[0].strip()] = kv[1].split("#")[0].strip()
+        except IOError:
+            pass # only ignore file access errors (including not-existing path)
+
+
 class CacheLock:
     """ Implements a lock for the object cache which
     can be used in 'with' statements. """
@@ -359,7 +403,7 @@ class CacheLock:
 
     @staticmethod
     def forPath(path):
-        timeoutMs = int(os.environ.get('CLCACHE_OBJECT_CACHE_TIMEOUT_MS', 10 * 1000))
+        timeoutMs = int(GlobalSettings.getValue('CLCACHE_OBJECT_CACHE_TIMEOUT_MS', 10 * 1000))
         lockName = path.replace(':', '-').replace('\\', '-')
         return CacheLock(lockName, timeoutMs)
 
@@ -505,10 +549,8 @@ class CacheFileStrategy:
     def __init__(self, cacheDirectory=None):
         self.dir = cacheDirectory
         if not self.dir:
-            try:
-                self.dir = os.environ["CLCACHE_DIR"]
-            except KeyError:
-                self.dir = os.path.join(os.path.expanduser("~"), "clcache")
+            self.dir = GlobalSettings.getValue("CLCACHE_DIR",
+                                               os.path.join(os.path.expanduser("~"), "clcache"))
 
         manifestsRootDir = os.path.join(self.dir, "manifests")
         ensureDirectoryExists(manifestsRootDir)
@@ -593,9 +635,10 @@ class CacheFileStrategy:
 
 class Cache:
     def __init__(self, cacheDirectory=None):
-        if os.environ.get("CLCACHE_MEMCACHED"):
+        memcached = GlobalSettings.getValue("CLCACHE_MEMCACHED")
+        if memcached and memcached not in ['0', 'false', 'False']:
             from .storage import CacheFileWithMemcacheFallbackStrategy
-            self.strategy = CacheFileWithMemcacheFallbackStrategy(os.environ.get("CLCACHE_MEMCACHED"),
+            self.strategy = CacheFileWithMemcacheFallbackStrategy(memcached,
                                                                   cacheDirectory=cacheDirectory)
         else:
             self.strategy = CacheFileStrategy(cacheDirectory=cacheDirectory)
@@ -900,7 +943,8 @@ def getCompilerHash(compilerBinary):
 
 
 def getFileHashes(filePaths):
-    if 'CLCACHE_SERVER' in os.environ:
+    server = GlobalSettings.getValue('CLCACHE_SERVER')
+    if server and server not in ['0', 'false', 'False']:
         pipeName = r'\\.\pipe\clcache_srv'
         while True:
             try:
@@ -939,7 +983,7 @@ def getStringHash(dataString):
 
 
 def expandBasedirPlaceholder(path):
-    baseDir = normalizeBaseDir(os.environ.get('CLCACHE_BASEDIR'))
+    baseDir = normalizeBaseDir(GlobalSettings.getValue('CLCACHE_BASEDIR'))
     if path.startswith(BASEDIR_REPLACEMENT):
         if not baseDir:
             raise LogicException('No CLCACHE_BASEDIR set, but found relative path ' + path)
@@ -949,7 +993,7 @@ def expandBasedirPlaceholder(path):
 
 
 def collapseBasedirToPlaceholder(path):
-    baseDir = normalizeBaseDir(os.environ.get('CLCACHE_BASEDIR'))
+    baseDir = normalizeBaseDir(GlobalSettings.getValue('CLCACHE_BASEDIR'))
     if baseDir is None:
         return path
     else:
@@ -971,8 +1015,8 @@ def ensureDirectoryExists(path):
 
 def copyOrLink(srcFilePath, dstFilePath):
     ensureDirectoryExists(os.path.dirname(os.path.abspath(dstFilePath)))
-
-    if "CLCACHE_HARDLINK" in os.environ:
+    hardlink = GlobalSettings.getValue("CLCACHE_HARDLINK")
+    if hardlink and hardlink not in ['0', 'false', 'False']:
         ret = windll.kernel32.CreateHardLinkW(str(dstFilePath), str(srcFilePath), None)
         if ret != 0:
             # Touch the time stamp of the new link so that the build system
@@ -998,11 +1042,10 @@ def myExecutablePath():
 
 
 def findCompilerBinary():
-    if "CLCACHE_CL" in os.environ:
-        path = os.environ["CLCACHE_CL"]
+    path = GlobalSettings.getValue("CLCACHE_CL")
+    if path:
         if os.path.basename(path) == path:
             path = which(path)
-
         return path if os.path.exists(path) else None
 
     frozenByPy2Exe = hasattr(sys, "frozen")
@@ -1020,7 +1063,8 @@ def findCompilerBinary():
 
 
 def printTraceStatement(msg: str) -> None:
-    if "CLCACHE_LOG" in os.environ:
+    clcachelog = GlobalSettings.getValue("CLCACHE_LOG")
+    if clcachelog and clcachelog not in ['0', 'false', 'False']:
         scriptDir = os.path.realpath(os.path.dirname(sys.argv[0]))
         with OUTPUT_LOCK:
             print(os.path.join(scriptDir, "clcache.py") + " " + msg)
@@ -1570,8 +1614,8 @@ clcache.py v{}
 
     printTraceStatement("Found real compiler binary at '{0!s}'".format(compiler))
     printTraceStatement("Arguments we care about: '{}'".format(sys.argv))
-
-    if "CLCACHE_DISABLE" in os.environ:
+    enabled = GlobalSettings.getValue("CLCACHE_DISABLE")
+    if enabled and enabled not in ['0', 'false', 'False']:
         return invokeRealCompiler(compiler, sys.argv[1:])[0]
     try:
         return processCompileRequest(cache, compiler, sys.argv)
@@ -1670,8 +1714,8 @@ def processSingleSource(compiler, cmdLine, sourceFile, objectFile, environment):
     try:
         assert objectFile is not None
         cache = Cache()
-
-        if 'CLCACHE_NODIRECT' in os.environ:
+        nodirect = GlobalSettings.getValue('CLCACHE_NODIRECT')
+        if nodirect and nodirect not in ['0', 'false', 'False']:
             return processNoDirect(cache, objectFile, compiler, cmdLine, environment)
         else:
             return processDirect(cache, objectFile, compiler, cmdLine, sourceFile)
@@ -1770,7 +1814,8 @@ def ensureArtifactsExist(cache, cachekey, reason, objectFile, compilerResult, ex
 
 
 if __name__ == '__main__':
-    if 'CLCACHE_PROFILE' in os.environ:
+    CLCACHE_PROFILE_ENABLED = GlobalSettings.getValue('CLCACHE_PROFILE')
+    if CLCACHE_PROFILE_ENABLED and CLCACHE_PROFILE_ENABLED not in ['0', 'false', 'False']:
         INVOCATION_HASH = getStringHash(','.join(sys.argv))
         cProfile.run('main()', filename='clcache-{}.prof'.format(INVOCATION_HASH))
     else:
